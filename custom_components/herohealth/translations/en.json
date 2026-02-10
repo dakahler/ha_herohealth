@@ -1,0 +1,43 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Hero Health",
+        "description": "Enter your Hero Health account credentials.",
+        "data": {
+          "email": "Email",
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to Hero Health",
+      "invalid_auth": "Invalid email or password",
+      "unknown": "An unexpected error occurred"
+    },
+    "abort": {
+      "already_configured": "This account is already configured"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "next_dose": {
+        "name": "Next Dose"
+      },
+      "adherence": {
+        "name": "Medication Adherence"
+      },
+      "last_event": {
+        "name": "Last Event"
+      },
+      "doses_taken_today": {
+        "name": "Doses Taken Today"
+      }
+    },
+    "binary_sensor": {
+      "device_online": {
+        "name": "Device Online"
+      }
+    }
+  }
+}
