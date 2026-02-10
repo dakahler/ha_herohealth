@@ -14,7 +14,6 @@ import hashlib
 import logging
 import os
 import re
-import time
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -23,11 +22,9 @@ import voluptuous as vol
 
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .api import HeroHealthApiClient, HeroHealthAuthError
+from .api import HeroHealthAuthError
 from .const import (
-    CONF_ACCOUNT_ID,
     CONF_REFRESH_TOKEN,
     DOMAIN,
     OAUTH_CLIENT_ID,
@@ -206,27 +203,6 @@ class HeroHealthConfigFlow(ConfigFlow, domain=DOMAIN):
                 if not access_token or not refresh_token:
                     errors["base"] = "invalid_auth"
                 else:
-                    # Fetch user details for account_id
-                    try:
-                        session = async_get_clientsession(self.hass)
-                        client = HeroHealthApiClient(
-                            session=session,
-                            refresh_token=refresh_token,
-                        )
-                        client._access_token = access_token
-                        client._token_acquired_at = time.monotonic()
-                        user_details = await client.get_user_details()
-                    except Exception:
-                        _LOGGER.exception("Failed to get user details")
-                        user_details = {}
-
-                    account_id = (
-                        user_details.get("account_id")
-                        or user_details.get("id")
-                        or user_details.get("user_id")
-                        or ""
-                    )
-
                     await self.async_set_unique_id(email.lower())
                     self._abort_if_unique_id_configured()
 
@@ -235,7 +211,6 @@ class HeroHealthConfigFlow(ConfigFlow, domain=DOMAIN):
                         data={
                             CONF_EMAIL: email,
                             CONF_REFRESH_TOKEN: refresh_token,
-                            CONF_ACCOUNT_ID: str(account_id),
                         },
                     )
 

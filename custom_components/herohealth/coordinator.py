@@ -14,7 +14,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import HeroHealthApiClient, HeroHealthApiError, HeroHealthAuthError
-from .const import CONF_ACCOUNT_ID, CONF_REFRESH_TOKEN, DEFAULT_SCAN_INTERVAL, DOMAIN
+from .const import CONF_REFRESH_TOKEN, DEFAULT_SCAN_INTERVAL, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -37,7 +37,6 @@ class HeroHealthCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.client = HeroHealthApiClient(
             session=session,
             refresh_token=entry.data[CONF_REFRESH_TOKEN],
-            account_id=entry.data.get(CONF_ACCOUNT_ID),
         )
 
     def _persist_refresh_token(self) -> None:
@@ -71,83 +70,113 @@ class HeroHealthCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _fetch_all_data(self) -> dict[str, Any]:
         """Fetch all data from the API concurrently."""
-        # Fetch main data concurrently
         results = await asyncio.gather(
             self.client.get_home_screen_doses(),
             self.client.get_home_screen_events(),
             self.client.get_pills_by_schedules(),
-            self.client.get_pill_stats(),
-            self.client.get_stats(),
-            self.client.check_device_offline(),
             self.client.get_device_config(),
             self.client.get_taken_slots(),
             return_exceptions=True,
         )
 
-        # Unpack results, using defaults for any that failed
-        home_doses = results[0] if not isinstance(results[0], Exception) else []
-        home_events = results[1] if not isinstance(results[1], Exception) else []
-        pills_by_schedule = results[2] if not isinstance(results[2], Exception) else []
-        pill_stats = results[3] if not isinstance(results[3], Exception) else {}
-        overall_stats = results[4] if not isinstance(results[4], Exception) else {}
-        device_offline = results[5] if not isinstance(results[5], Exception) else {}
-        device_config = results[6] if not isinstance(results[6], Exception) else {}
-        taken_slots = results[7] if not isinstance(results[7], Exception) else []
+        raw_doses = results[0] if not isinstance(results[0], Exception) else {}
+        raw_events = results[1] if not isinstance(results[1], Exception) else {}
+        pills_by_schedule = results[2] if not isinstance(results[2], Exception) else {}
+        device_config = results[3] if not isinstance(results[3], Exception) else {}
+        raw_taken_slots = results[4] if not isinstance(results[4], Exception) else {}
 
         # Log any individual failures
         for i, result in enumerate(results):
             if isinstance(result, Exception):
                 _LOGGER.warning("API call %d failed: %s", i, result)
 
-        # Check if ALL calls failed with auth error - re-raise to trigger re-auth
+        # Check if ALL calls failed with auth error — re-raise to trigger re-auth
         auth_failures = [r for r in results if isinstance(r, HeroHealthAuthError)]
         if len(auth_failures) == len(results):
             raise auth_failures[0]
 
-        # Normalize taken_slots to a list
-        if isinstance(taken_slots, dict):
-            taken_slots = taken_slots.get("slots", taken_slots.get("results", []))
-        if not isinstance(taken_slots, list):
-            taken_slots = []
+        # Flatten doses from nested dates[].times[].doses[] structure
+        doses: list[dict[str, Any]] = []
+        if isinstance(raw_doses, dict):
+            for date_entry in raw_doses.get("dates", []):
+                if not isinstance(date_entry, dict):
+                    continue
+                for time_entry in date_entry.get("times", []):
+                    if not isinstance(time_entry, dict):
+                        continue
+                    scheduled_dt = time_entry.get("scheduled_datetime")
+                    for dose in time_entry.get("doses", []):
+                        if isinstance(dose, dict):
+                            dose["scheduled_datetime"] = scheduled_dt
+                            doses.append(dose)
+
+        # Flatten events from {today: [...], yesterday: [...]} structure
+        events: list[dict[str, Any]] = []
+        if isinstance(raw_events, dict):
+            for day_events in raw_events.values():
+                if isinstance(day_events, list):
+                    for event in day_events:
+                        if isinstance(event, dict):
+                            events.append(event)
+
+        # Normalize device_config
+        if not isinstance(device_config, dict):
+            device_config = {}
+
+        # Build pill name map from device_config
+        pill_map: dict[int, dict[str, Any]] = {}
+        for pill in device_config.get("pills", []):
+            if isinstance(pill, dict) and pill.get("slot") is not None:
+                pill_map[pill["slot"]] = pill
+
+        # Normalize taken_slots: API returns {"slots": [1, 2, 3, ...]}
+        slot_numbers: list[int] = []
+        if isinstance(raw_taken_slots, dict):
+            slot_numbers = raw_taken_slots.get("slots", [])
+        elif isinstance(raw_taken_slots, list):
+            slot_numbers = raw_taken_slots
+
+        # Enrich slots with pill names from device_config
+        taken_slots: list[dict[str, Any]] = []
+        for slot_num in slot_numbers:
+            if not isinstance(slot_num, int):
+                continue
+            pill_info = pill_map.get(slot_num, {})
+            taken_slots.append({
+                "slot_index": slot_num,
+                "pill_name": pill_info.get("name"),
+                "stored_in_hero": pill_info.get("stored_in_hero"),
+            })
 
         # Fetch remaining days for each occupied slot
         remaining_days: dict[int, dict[str, Any]] = {}
-        for slot in taken_slots:
-            slot_index = slot.get("slot_index") if isinstance(slot, dict) else None
-            if slot_index is not None:
-                try:
-                    days_data = await self.client.get_pill_remaining_days(slot_index)
-                    remaining_days[slot_index] = days_data
-                except HeroHealthApiError as err:
-                    _LOGGER.debug(
-                        "Failed to get remaining days for slot %s: %s",
-                        slot_index,
-                        err,
-                    )
-
-        # Determine device online status
-        device_online = True
-        if isinstance(device_offline, dict):
-            device_online = not device_offline.get("is_offline", not device_offline.get("online", True))
+        for slot_info in taken_slots:
+            slot_index = slot_info["slot_index"]
+            try:
+                days_data = await self.client.get_pill_remaining_days(slot_index)
+                remaining_days[slot_index] = days_data
+            except HeroHealthApiError as err:
+                _LOGGER.debug(
+                    "Failed to get remaining days for slot %s: %s",
+                    slot_index,
+                    err,
+                )
 
         data = {
-            "home_doses": home_doses if isinstance(home_doses, list) else [],
-            "home_events": home_events if isinstance(home_events, list) else [],
-            "pills_by_schedule": pills_by_schedule if isinstance(pills_by_schedule, list) else [],
-            "pill_stats": pill_stats if isinstance(pill_stats, (dict, list)) else {},
-            "overall_stats": overall_stats if isinstance(overall_stats, dict) else {},
-            "device_online": device_online,
-            "device_config": device_config if isinstance(device_config, dict) else {},
+            "doses": doses,
+            "events": events,
+            "pills_by_schedule": pills_by_schedule,
+            "device_config": device_config,
             "taken_slots": taken_slots,
             "remaining_days": remaining_days,
+            "pill_map": pill_map,
         }
 
         _LOGGER.debug(
-            "Hero Health update successful: %d doses, %d events, %d slots, device_online=%s",
-            len(data["home_doses"]),
-            len(data["home_events"]),
-            len(data["taken_slots"]),
-            data["device_online"],
+            "Hero Health update: %d doses, %d events, %d slots",
+            len(doses),
+            len(events),
+            len(taken_slots),
         )
 
         return data

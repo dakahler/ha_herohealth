@@ -15,8 +15,7 @@ HERO_CLIENT_HEADER = "HeroWeb;desktop-Chrome;4.0.0"
 # 5 minutes - medication events are time-sensitive
 DEFAULT_SCAN_INTERVAL = 300
 
-# Token assumed lifetime (50 minutes, conservative for typical 60-min tokens)
-TOKEN_LIFETIME_SECONDS = 3000
+# Token lifetime is 900s (15 min); refresh proactively with 2 min buffer
+TOKEN_LIFETIME_SECONDS = 900
 
-CONF_ACCOUNT_ID = "account_id"
 CONF_REFRESH_TOKEN = "refresh_token"

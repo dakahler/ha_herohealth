@@ -30,7 +30,11 @@ async def async_setup_entry(
 class HeroHealthDeviceOnlineSensor(
     CoordinatorEntity[HeroHealthCoordinator], BinarySensorEntity
 ):
-    """Binary sensor for Hero Health device online status."""
+    """Binary sensor for Hero Health device online status.
+
+    Derived from whether the coordinator can successfully reach the API
+    and return data (the check-hero-offline endpoint is unavailable).
+    """
 
     _attr_has_entity_name = True
     entity_description = BinarySensorEntityDescription(
@@ -49,23 +53,13 @@ class HeroHealthDeviceOnlineSensor(
             identifiers={(DOMAIN, entry.entry_id)},
             name="Hero Health Dispenser",
             manufacturer="Hero Health",
-            model=coordinator.data.get("device_config", {}).get("model", "Hero")
-            if coordinator.data
-            else "Hero",
-            sw_version=coordinator.data.get("device_config", {}).get(
-                "firmware_version"
-            )
-            if coordinator.data
-            else None,
             entry_type=DeviceEntryType.SERVICE,
         )
 
     @property
     def is_on(self) -> bool | None:
-        """Return True if the device is online."""
-        if self.coordinator.data is None:
-            return None
-        return self.coordinator.data.get("device_online")
+        """Return True if the coordinator has data (API reachable)."""
+        return self.coordinator.data is not None
 
     @property
     def extra_state_attributes(self) -> dict[str, str | None]:
@@ -74,6 +68,6 @@ class HeroHealthDeviceOnlineSensor(
             return {}
         config = self.coordinator.data.get("device_config", {})
         return {
-            "firmware_version": config.get("firmware_version"),
-            "device_id": config.get("device_id") or config.get("id"),
+            "timezone_offset": config.get("timezone_offset"),
+            "travel_mode": config.get("travel_mode"),
         }

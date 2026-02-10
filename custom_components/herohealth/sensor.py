@@ -32,7 +32,6 @@ async def async_setup_entry(
 
     entities: list[SensorEntity] = [
         HeroHealthNextDoseSensor(coordinator, entry),
-        HeroHealthAdherenceSensor(coordinator, entry),
         HeroHealthLastEventSensor(coordinator, entry),
         HeroHealthDosesTakenTodaySensor(coordinator, entry),
     ]
@@ -43,12 +42,7 @@ async def async_setup_entry(
         if not isinstance(slot, dict):
             continue
         slot_index = slot.get("slot_index")
-        pill_name = (
-            slot.get("pill_name")
-            or slot.get("name")
-            or slot.get("drug_name")
-            or f"Slot {slot_index}"
-        )
+        pill_name = slot.get("pill_name") or f"Slot {slot_index}"
         if slot_index is not None:
             entities.append(
                 HeroHealthPillRemainingDaysSensor(
@@ -78,14 +72,6 @@ class HeroHealthBaseSensor(CoordinatorEntity[HeroHealthCoordinator], SensorEntit
             identifiers={(DOMAIN, entry.entry_id)},
             name="Hero Health Dispenser",
             manufacturer="Hero Health",
-            model=coordinator.data.get("device_config", {}).get("model", "Hero")
-            if coordinator.data
-            else "Hero",
-            sw_version=coordinator.data.get("device_config", {}).get(
-                "firmware_version"
-            )
-            if coordinator.data
-            else None,
             entry_type=DeviceEntryType.SERVICE,
         )
 
@@ -101,6 +87,41 @@ class HeroHealthBaseSensor(CoordinatorEntity[HeroHealthCoordinator], SensorEntit
             return dt
         except (ValueError, AttributeError):
             return None
+
+    @staticmethod
+    def _dose_is_taken(dose: dict[str, Any]) -> bool:
+        """Check if a dose state indicates it was taken."""
+        state = dose.get("state", "")
+        return state.startswith("taken")
+
+    @staticmethod
+    def _dose_is_done(dose: dict[str, Any]) -> bool:
+        """Check if a dose state indicates it is no longer pending."""
+        state = dose.get("state", "")
+        return state.startswith("taken") or state in ("missed", "skipped")
+
+    @staticmethod
+    def _get_pill_names(dose: dict[str, Any]) -> list[str]:
+        """Extract pill names from a dose's pills array."""
+        names = []
+        pills = dose.get("pills", [])
+        if not isinstance(pills, list):
+            return names
+        for pill_entry in pills:
+            if not isinstance(pill_entry, dict):
+                continue
+            # Pills are nested: {"pill": {"name": "..."}, "scheduled_pill_qty": ...}
+            pill_obj = pill_entry.get("pill", {})
+            if isinstance(pill_obj, dict):
+                name = pill_obj.get("name")
+                if name:
+                    names.append(name)
+            else:
+                # Fallback for flat structure
+                name = pill_entry.get("name") or pill_entry.get("drug_name")
+                if name:
+                    names.append(name)
+        return names
 
 
 class HeroHealthNextDoseSensor(HeroHealthBaseSensor):
@@ -127,23 +148,17 @@ class HeroHealthNextDoseSensor(HeroHealthBaseSensor):
         if self.coordinator.data is None:
             return None
 
-        doses = self.coordinator.data.get("home_doses", [])
+        doses = self.coordinator.data.get("doses", [])
         now = dt_util.now()
         next_time: datetime | None = None
 
         for dose in doses:
             if not isinstance(dose, dict):
                 continue
-            status = dose.get("status", "").lower()
-            if status in ("taken", "missed", "skipped"):
+            if self._dose_is_done(dose):
                 continue
 
-            time_str = (
-                dose.get("scheduled_time")
-                or dose.get("time")
-                or dose.get("schedule_time")
-            )
-            dose_time = self._parse_datetime(time_str)
+            dose_time = self._parse_datetime(dose.get("scheduled_datetime"))
             if dose_time and dose_time > now:
                 if next_time is None or dose_time < next_time:
                     next_time = dose_time
@@ -156,7 +171,7 @@ class HeroHealthNextDoseSensor(HeroHealthBaseSensor):
         if self.coordinator.data is None:
             return {}
 
-        doses = self.coordinator.data.get("home_doses", [])
+        doses = self.coordinator.data.get("doses", [])
         now = dt_util.now()
         next_dose: dict[str, Any] | None = None
         next_time: datetime | None = None
@@ -164,16 +179,10 @@ class HeroHealthNextDoseSensor(HeroHealthBaseSensor):
         for dose in doses:
             if not isinstance(dose, dict):
                 continue
-            status = dose.get("status", "").lower()
-            if status in ("taken", "missed", "skipped"):
+            if self._dose_is_done(dose):
                 continue
 
-            time_str = (
-                dose.get("scheduled_time")
-                or dose.get("time")
-                or dose.get("schedule_time")
-            )
-            dose_time = self._parse_datetime(time_str)
+            dose_time = self._parse_datetime(dose.get("scheduled_datetime"))
             if dose_time and dose_time > now:
                 if next_time is None or dose_time < next_time:
                     next_time = dose_time
@@ -182,85 +191,10 @@ class HeroHealthNextDoseSensor(HeroHealthBaseSensor):
         if not next_dose:
             return {}
 
-        pills = next_dose.get("pills", [])
-        pill_names = []
-        for pill in pills if isinstance(pills, list) else []:
-            name = pill.get("name") or pill.get("drug_name") or pill.get("pill_name")
-            if name:
-                pill_names.append(name)
-
+        pill_names = self._get_pill_names(next_dose)
         return {
             "pills": ", ".join(pill_names) if pill_names else None,
-            "pill_count": len(pills) if isinstance(pills, list) else 0,
-        }
-
-
-class HeroHealthAdherenceSensor(HeroHealthBaseSensor):
-    """Sensor for overall medication adherence percentage."""
-
-    def __init__(
-        self, coordinator: HeroHealthCoordinator, entry: ConfigEntry
-    ) -> None:
-        """Initialize the sensor."""
-        super().__init__(
-            coordinator,
-            entry,
-            SensorEntityDescription(
-                key="adherence",
-                name="Medication Adherence",
-                icon="mdi:chart-arc",
-                native_unit_of_measurement="%",
-                state_class=SensorStateClass.MEASUREMENT,
-            ),
-        )
-
-    @property
-    def native_value(self) -> float | None:
-        """Return the adherence percentage."""
-        if self.coordinator.data is None:
-            return None
-
-        stats = self.coordinator.data.get("overall_stats", {})
-        if not isinstance(stats, dict):
-            return None
-
-        # Try various possible field names
-        adherence = (
-            stats.get("adherence_percentage")
-            or stats.get("adherence")
-            or stats.get("adherence_rate")
-            or stats.get("percentage")
-        )
-
-        if adherence is not None:
-            try:
-                return round(float(adherence), 1)
-            except (ValueError, TypeError):
-                return None
-
-        # Calculate from taken/total if available
-        taken = stats.get("taken_count") or stats.get("taken") or 0
-        total = stats.get("total_count") or stats.get("total") or 0
-        if total > 0:
-            return round(float(taken) / float(total) * 100, 1)
-
-        return None
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        """Return extra state attributes."""
-        if self.coordinator.data is None:
-            return {}
-
-        stats = self.coordinator.data.get("overall_stats", {})
-        if not isinstance(stats, dict):
-            return {}
-
-        return {
-            "taken_count": stats.get("taken_count") or stats.get("taken"),
-            "missed_count": stats.get("missed_count") or stats.get("missed"),
-            "total_count": stats.get("total_count") or stats.get("total"),
-            "period": stats.get("period"),
+            "pill_count": len(pill_names),
         }
 
 
@@ -288,20 +222,15 @@ class HeroHealthLastEventSensor(HeroHealthBaseSensor):
         if self.coordinator.data is None:
             return None
 
-        events = self.coordinator.data.get("home_events", [])
-        if not events or not isinstance(events, list):
+        events = self.coordinator.data.get("events", [])
+        if not events:
             return None
 
         latest_time: datetime | None = None
         for event in events:
             if not isinstance(event, dict):
                 continue
-            time_str = (
-                event.get("timestamp")
-                or event.get("time")
-                or event.get("created_at")
-                or event.get("event_time")
-            )
+            time_str = event.get("actual_datetime") or event.get("scheduled_datetime")
             event_time = self._parse_datetime(time_str)
             if event_time:
                 if latest_time is None or event_time > latest_time:
@@ -315,22 +244,16 @@ class HeroHealthLastEventSensor(HeroHealthBaseSensor):
         if self.coordinator.data is None:
             return {}
 
-        events = self.coordinator.data.get("home_events", [])
-        if not events or not isinstance(events, list):
+        events = self.coordinator.data.get("events", [])
+        if not events:
             return {}
 
-        # Find the most recent event
         latest_event: dict[str, Any] | None = None
         latest_time: datetime | None = None
         for event in events:
             if not isinstance(event, dict):
                 continue
-            time_str = (
-                event.get("timestamp")
-                or event.get("time")
-                or event.get("created_at")
-                or event.get("event_time")
-            )
+            time_str = event.get("actual_datetime") or event.get("scheduled_datetime")
             event_time = self._parse_datetime(time_str)
             if event_time:
                 if latest_time is None or event_time > latest_time:
@@ -340,27 +263,17 @@ class HeroHealthLastEventSensor(HeroHealthBaseSensor):
         if not latest_event:
             return {}
 
-        event_type = (
-            latest_event.get("event_type")
-            or latest_event.get("type")
-            or latest_event.get("action")
-        )
-        details = (
-            latest_event.get("details")
-            or latest_event.get("description")
-            or latest_event.get("message")
-        )
-
-        pills = latest_event.get("pills", [])
+        # Event pills are flat: [{"name": "...", "dosage": "..."}]
         pill_names = []
-        for pill in pills if isinstance(pills, list) else []:
-            name = pill.get("name") or pill.get("drug_name") or pill.get("pill_name")
-            if name:
-                pill_names.append(name)
+        for pill in latest_event.get("pills", []):
+            if isinstance(pill, dict):
+                name = pill.get("name")
+                if name:
+                    pill_names.append(name)
 
         return {
-            "event_type": event_type,
-            "details": details,
+            "status": latest_event.get("status"),
+            "pill_source": latest_event.get("pill_source"),
             "pills": ", ".join(pill_names) if pill_names else None,
         }
 
@@ -389,20 +302,18 @@ class HeroHealthDosesTakenTodaySensor(HeroHealthBaseSensor):
         if self.coordinator.data is None:
             return None
 
-        doses = self.coordinator.data.get("home_doses", [])
+        doses = self.coordinator.data.get("doses", [])
         today = dt_util.now().date()
         taken = 0
 
         for dose in doses:
             if not isinstance(dose, dict):
                 continue
-            status = dose.get("status", "").lower()
-            if status != "taken":
+            if not self._dose_is_taken(dose):
                 continue
             time_str = (
-                dose.get("scheduled_time")
-                or dose.get("time")
-                or dose.get("schedule_time")
+                dose.get("dispensed_datetime")
+                or dose.get("scheduled_datetime")
             )
             dose_time = self._parse_datetime(time_str)
             if dose_time and dose_time.date() == today:
@@ -416,7 +327,7 @@ class HeroHealthDosesTakenTodaySensor(HeroHealthBaseSensor):
         if self.coordinator.data is None:
             return {}
 
-        doses = self.coordinator.data.get("home_doses", [])
+        doses = self.coordinator.data.get("doses", [])
         today = dt_util.now().date()
         total = 0
         missed = 0
@@ -426,19 +337,18 @@ class HeroHealthDosesTakenTodaySensor(HeroHealthBaseSensor):
             if not isinstance(dose, dict):
                 continue
             time_str = (
-                dose.get("scheduled_time")
-                or dose.get("time")
-                or dose.get("schedule_time")
+                dose.get("dispensed_datetime")
+                or dose.get("scheduled_datetime")
             )
             dose_time = self._parse_datetime(time_str)
             if not dose_time or dose_time.date() != today:
                 continue
 
             total += 1
-            status = dose.get("status", "").lower()
-            if status == "missed":
+            state = dose.get("state", "")
+            if state == "missed":
                 missed += 1
-            elif status not in ("taken", "skipped"):
+            elif not self._dose_is_done(dose):
                 pending += 1
 
         return {
@@ -480,9 +390,6 @@ class HeroHealthPillRemainingDaysSensor(
             identifiers={(DOMAIN, entry.entry_id)},
             name="Hero Health Dispenser",
             manufacturer="Hero Health",
-            model=coordinator.data.get("device_config", {}).get("model", "Hero")
-            if coordinator.data
-            else "Hero",
             entry_type=DeviceEntryType.SERVICE,
         )
 
@@ -497,11 +404,8 @@ class HeroHealthPillRemainingDaysSensor(
         if not isinstance(slot_data, dict):
             return None
 
-        days = (
-            slot_data.get("remaining_days")
-            or slot_data.get("days_remaining")
-            or slot_data.get("days")
-        )
+        # API returns {"exact": N, "min": N, "max": N, "error": ...}
+        days = slot_data.get("exact") or slot_data.get("min")
         if days is not None:
             try:
                 return int(days)
@@ -523,8 +427,8 @@ class HeroHealthPillRemainingDaysSensor(
         return {
             "slot_index": self._slot_index,
             "pill_name": self._pill_name,
-            "pills_remaining": slot_data.get("pills_remaining")
-            or slot_data.get("remaining"),
-            "pills_per_day": slot_data.get("pills_per_day")
-            or slot_data.get("daily_count"),
+            "days_min": slot_data.get("min"),
+            "days_max": slot_data.get("max"),
+            "pill_count_exact": slot_data.get("pill_count_exact"),
+            "error": slot_data.get("error"),
         }
