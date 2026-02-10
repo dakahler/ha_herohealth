@@ -29,15 +29,14 @@ A [Home Assistant](https://www.home-assistant.io/) custom integration for [Hero 
 
 | Entity | Type | Description |
 |--------|------|-------------|
-| Device Online | Binary sensor | Whether the Hero dispenser is connected |
+| Device Online | Binary sensor | Whether the Hero dispenser is reachable |
 
 ### Medications
 
 | Entity | Type | Description |
 |--------|------|-------------|
 | Next Dose | Timestamp | Time of the next scheduled dose |
-| Medication Adherence | Percentage | Overall medication adherence rate |
-| Last Event | Timestamp | Most recent device event |
+| Last Event | Timestamp | Most recent dispensing event |
 | Doses Taken Today | Count | Number of doses taken today |
 | *{Pill Name}* Remaining Days | Days | Days of supply remaining (one per medication slot) |
 
@@ -46,11 +45,88 @@ A [Home Assistant](https://www.home-assistant.io/) custom integration for [Hero 
 Each sensor exposes additional attributes:
 
 - **Next Dose**: pill names, pill count
-- **Medication Adherence**: taken/missed/total counts, period
-- **Last Event**: event type, details, pill names
+- **Last Event**: status, pill source, pill names
 - **Doses Taken Today**: total/missed/pending counts for today
-- **Remaining Days**: slot index, pill name, pills remaining, pills per day
-- **Device Online**: firmware version, device ID
+- **Remaining Days**: slot index, pill name, days min/max, pill count, error
+- **Device Online**: timezone offset, travel mode
+
+## Example Automations
+
+### Notify When It's Time to Take Medication
+
+```yaml
+automation:
+  - alias: "Medication Reminder"
+    trigger:
+      - platform: template
+        value_template: >
+          {{ (as_timestamp(states('sensor.hero_health_dispenser_next_dose')) - as_timestamp(now())) < 300 }}
+    condition:
+      - condition: template
+        value_template: >
+          {{ states('sensor.hero_health_dispenser_next_dose') not in ['unknown', 'unavailable'] }}
+    action:
+      - service: notify.mobile_app
+        data:
+          title: "Medication Reminder"
+          message: >
+            Time to take your medication:
+            {{ state_attr('sensor.hero_health_dispenser_next_dose', 'pills') }}
+```
+
+### Alert on Missed Doses
+
+```yaml
+automation:
+  - alias: "Missed Dose Alert"
+    trigger:
+      - platform: state
+        entity_id: sensor.hero_health_dispenser_doses_taken_today
+    condition:
+      - condition: template
+        value_template: >
+          {{ state_attr('sensor.hero_health_dispenser_doses_taken_today', 'missed_today') | int > 0 }}
+    action:
+      - service: notify.mobile_app
+        data:
+          title: "Missed Dose"
+          message: >
+            {{ state_attr('sensor.hero_health_dispenser_doses_taken_today', 'missed_today') }} dose(s) missed today.
+```
+
+### Notify Caregiver When Device Goes Offline
+
+```yaml
+automation:
+  - alias: "Hero Device Offline"
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.hero_health_dispenser_device_online
+        to: "off"
+        for:
+          minutes: 30
+    action:
+      - service: notify.mobile_app
+        data:
+          title: "Hero Health Offline"
+          message: "The Hero medication dispenser has been offline for 30 minutes."
+```
+
+### Dashboard Card
+
+```yaml
+type: entities
+title: Medications
+entities:
+  - entity: sensor.hero_health_dispenser_next_dose
+    name: Next Dose
+  - entity: sensor.hero_health_dispenser_doses_taken_today
+    name: Doses Taken Today
+  - entity: sensor.hero_health_dispenser_last_event
+    name: Last Event
+  - entity: binary_sensor.hero_health_dispenser_device_online
+    name: Device Online
+```
 
 ## Polling
 
@@ -67,6 +143,9 @@ Verify your credentials work in the Hero Health mobile app. The integration uses
 
 ### Sensors show "unavailable"
 Check the Home Assistant logs for `herohealth` entries. The API response format may have changed — please open an issue with the relevant log output.
+
+### Remaining Days shows "Unknown"
+The Hero device needs to know how many pills are in each slot to calculate remaining days. This is populated after a pill count or refill through the Hero app.
 
 ### Re-authentication required
 If your refresh token expires (e.g., after a long HA downtime), Home Assistant will prompt you to re-authenticate via the Integrations page.
