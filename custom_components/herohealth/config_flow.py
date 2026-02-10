@@ -55,8 +55,6 @@ class HeroHealthConfigFlow(ConfigFlow, domain=DOMAIN):
 
         Returns the token response dict with access_token and refresh_token.
         """
-        session = async_get_clientsession(self.hass)
-
         # Generate PKCE challenge
         verifier = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode()
         challenge = (
