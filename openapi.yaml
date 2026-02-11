@@ -1,0 +1,878 @@
+openapi: 3.0.3
+info:
+  title: Hero Health API
+  description: |
+    Reverse-engineered REST API for Hero Health smart medication dispensers.
+    There is no official public API — this spec was built by inspecting the
+    mobile app's network traffic and the web frontend at cloud.herohealth.com.
+
+    ## Authentication
+
+    Hero Health uses OAuth2 Authorization Code with PKCE, hosted on
+    `id.herohealth.com`. The flow mirrors the mobile app:
+
+    1. **GET** `https://id.herohealth.com/login/` with OAuth query params →
+       returns an HTML login form with a CSRF token.
+    2. **POST** the login form with email, password, and CSRF token →
+       302 redirect to `heroapp://auth?code=...`
+    3. **POST** `https://id.herohealth.com/o/token/` with the authorization
+       code and PKCE verifier → access + refresh tokens.
+    4. Use the access token as a Bearer token on `cloud.herohealth.com`.
+
+    Access tokens expire in **900 seconds** (15 minutes). Refresh via the
+    OAuth2 token endpoint with `grant_type=refresh_token`.
+  version: "1.0.0"
+  contact:
+    name: GitHub
+    url: https://github.com/dakahler/ha_herohealth
+
+servers:
+  - url: https://cloud.herohealth.com
+    description: Data API
+  - url: https://id.herohealth.com
+    description: OAuth2 / Identity
+
+security:
+  - bearerAuth: []
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: OAuth2 access token obtained from id.herohealth.com
+
+    oauth2:
+      type: oauth2
+      flows:
+        authorizationCode:
+          authorizationUrl: https://id.herohealth.com/login/
+          tokenUrl: https://id.herohealth.com/o/token/
+          scopes: {}
+
+  schemas:
+    Pill:
+      type: object
+      properties:
+        hero_pill_id:
+          type: integer
+          example: 29789069
+        name:
+          type: string
+          example: "Medication A 100 mg"
+        name_short:
+          type: string
+          nullable: true
+        dosage:
+          type: string
+          example: "100 mg"
+        form:
+          type: string
+          nullable: true
+        is_sticky:
+          type: boolean
+          nullable: true
+        is_generic:
+          type: boolean
+        gpi:
+          type: string
+          nullable: true
+        pill_type:
+          type: string
+          nullable: true
+
+    DosePill:
+      type: object
+      properties:
+        pill:
+          $ref: '#/components/schemas/Pill'
+        scheduled_pill_qty:
+          type: integer
+          example: 2
+        actual_pill_qty:
+          type: integer
+          nullable: true
+          example: 2
+        manual_pill_qty:
+          type: integer
+          example: 0
+        error:
+          type: string
+          nullable: true
+        schedule:
+          type: object
+          properties:
+            hero_schedule_id:
+              type: integer
+            dow:
+              type: string
+              example: "Mon, Tue, Wed, Thu, Fri, Sat, Sun"
+            every_x_days:
+              type: integer
+              nullable: true
+            next_date:
+              type: string
+              nullable: true
+            time:
+              type: string
+              example: "07:00"
+        expired_date:
+          type: string
+          nullable: true
+
+    Dose:
+      type: object
+      properties:
+        dose_type:
+          type: string
+          enum: [in_hero, manual]
+          example: "in_hero"
+        state:
+          type: string
+          description: |
+            Dose state. Known values:
+            - `taken_on_time` — dispensed on schedule
+            - `taken_late` — dispensed after the scheduled window
+            - `not_available` — upcoming / not yet dispensable
+            - `missed` — scheduled time passed without dispensing
+            - `skipped` — user skipped this dose
+          example: "taken_on_time"
+        dispensed_datetime:
+          type: string
+          format: date-time
+          nullable: true
+          example: "2026-02-10 07:33:25"
+        reported_datetime:
+          type: string
+          format: date-time
+          nullable: true
+          example: "2026-02-10 07:33:25"
+        dispense_initiated_by:
+          type: string
+          nullable: true
+        dispense_initiated_from:
+          type: string
+          nullable: true
+        pills:
+          type: array
+          items:
+            $ref: '#/components/schemas/DosePill'
+
+    TimeSlot:
+      type: object
+      properties:
+        scheduled_datetime:
+          type: string
+          format: date-time
+          description: Scheduled time for this dose group.
+          example: "2026-02-10 07:00:00"
+        doses:
+          type: array
+          items:
+            $ref: '#/components/schemas/Dose'
+
+    DateEntry:
+      type: object
+      properties:
+        date:
+          type: string
+          format: date
+          example: "2026-02-10"
+        times:
+          type: array
+          items:
+            $ref: '#/components/schemas/TimeSlot'
+
+    EventPill:
+      type: object
+      properties:
+        name:
+          type: string
+          example: "Medication A 100 mg"
+        dosage:
+          type: string
+          example: "100 mg"
+        scheduled_qty:
+          type: integer
+          example: 2
+        actual_qty:
+          type: integer
+          nullable: true
+          example: 2
+        manual_qty:
+          type: integer
+          nullable: true
+          example: 0
+
+    Event:
+      type: object
+      properties:
+        pills:
+          type: array
+          items:
+            $ref: '#/components/schemas/EventPill'
+        scheduled_datetime:
+          type: string
+          format: date-time
+          example: "2026-02-10 07:00:00"
+        actual_datetime:
+          type: string
+          format: date-time
+          nullable: true
+          example: "2026-02-10 07:33:25"
+        pill_source:
+          type: string
+          example: "in_hero"
+        status:
+          type: string
+          description: "Known values: took_on_time, took_late, missed, skipped"
+          example: "took_on_time"
+        related_event_type:
+          type: string
+          nullable: true
+        related_event_subtype:
+          type: string
+          nullable: true
+        related_event_id:
+          type: string
+          nullable: true
+        schedule_id:
+          type: string
+          example: "fd3fc952ec14b8abfcd9e471fcb7982c25178ba6..."
+
+    PillSchedule:
+      type: object
+      properties:
+        dow:
+          type: string
+          example: "Mon, Tue, Wed, Thu, Fri, Sat, Sun"
+        every_x_days:
+          type: integer
+          nullable: true
+        next_date:
+          type: string
+          nullable: true
+        time:
+          type: string
+          example: "20:00"
+        hero_schedule_id:
+          type: integer
+          example: 10359089
+        qty:
+          type: integer
+          example: 1
+        valid_from:
+          type: string
+          nullable: true
+        valid_to:
+          type: string
+          nullable: true
+
+    DevicePill:
+      type: object
+      properties:
+        slot:
+          type: integer
+          description: Physical slot number in the Hero device (1-10).
+          example: 1
+        name:
+          type: string
+          example: "Medication B 300 mg"
+        name_short:
+          type: string
+          nullable: true
+        dosage:
+          type: string
+          example: "300 mg"
+        expires:
+          type: string
+          nullable: true
+        requires_pin:
+          type: boolean
+        stored_in_hero:
+          type: boolean
+        estimated_amount:
+          type: integer
+          nullable: true
+        schedules:
+          type: array
+          items:
+            type: object
+            properties:
+              dow:
+                type: string
+              every_x_days:
+                type: integer
+                nullable: true
+              next_date:
+                type: string
+                nullable: true
+              times:
+                type: array
+                items:
+                  type: string
+              qty:
+                type: integer
+        pill_schedules:
+          type: array
+          items:
+            $ref: '#/components/schemas/PillSchedule'
+        in_hero_from:
+          type: string
+          format: date
+          example: "2022-12-20"
+        level_warning:
+          type: string
+          example: "ok"
+        refill_prompt:
+          type: string
+          nullable: true
+        form:
+          type: string
+          example: "Capsule"
+        is_generic:
+          type: boolean
+        pill_type:
+          type: string
+          nullable: true
+        pill_level_enum:
+          type: string
+          description: "Known values: high, medium, low"
+          example: "high"
+        last_refill_date_string:
+          type: string
+          format: date
+          nullable: true
+          example: "2025-11-10"
+        dispense_count:
+          type: integer
+          example: 79
+        max_doses:
+          type: integer
+          example: 24
+        max_pills_per_dispense:
+          type: integer
+          nullable: true
+        min_time_between_dispenses:
+          type: integer
+          nullable: true
+        pill_level_calculated:
+          type: string
+          example: "medium"
+        update_exact_count:
+          type: integer
+          nullable: true
+        update_expiration_date:
+          type: string
+          nullable: true
+        gpi:
+          type: string
+          nullable: true
+        hero_pill_id:
+          type: integer
+
+    HealthCondition:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 123
+        alias:
+          type: string
+          example: "Consumption"
+
+    RemainingDays:
+      type: object
+      properties:
+        exact:
+          type: integer
+          nullable: true
+          description: Exact number of days remaining if calculable.
+        min:
+          type: integer
+          nullable: true
+          description: Minimum estimated days remaining.
+        max:
+          type: integer
+          nullable: true
+          description: Maximum estimated days remaining.
+        error:
+          type: string
+          nullable: true
+          description: "Error code if calculation fails. Known value: cannot_calculate"
+          example: "cannot_calculate"
+        pill_count_exact:
+          type: integer
+          nullable: true
+        pill_count_min:
+          type: integer
+          nullable: true
+        pill_count_max:
+          type: integer
+          nullable: true
+
+    TokenResponse:
+      type: object
+      properties:
+        access_token:
+          type: string
+          description: JWT access token, valid for 900 seconds.
+        expires_in:
+          type: integer
+          example: 900
+        token_type:
+          type: string
+          example: "Bearer"
+        scope:
+          type: string
+        refresh_token:
+          type: string
+
+  parameters:
+    HeroClient:
+      name: X-Hero-Client
+      in: header
+      required: true
+      schema:
+        type: string
+        default: "HeroWeb;desktop-Chrome;4.0.0"
+      description: Client identifier string.
+
+paths:
+  # ── OAuth2 (id.herohealth.com) ─────────────────────────────────
+
+  /login/:
+    servers:
+      - url: https://id.herohealth.com
+    get:
+      summary: Login page
+      operationId: getLoginPage
+      tags: [Auth]
+      security: []
+      description: |
+        Returns an HTML login form when called with OAuth query parameters.
+        Without the parameters, returns a "Session Expired" page.
+        The form contains a CSRF token (`csrfmiddlewaretoken`) and sets
+        a `csrftoken` cookie required for the POST.
+      parameters:
+        - name: client_id
+          in: query
+          required: true
+          schema:
+            type: string
+            example: "sGNw0O6padHYWwSWIon21jt1QqEYAkmZLYUps60L"
+        - name: redirect_uri
+          in: query
+          required: true
+          schema:
+            type: string
+            example: "heroapp://auth"
+        - name: response_type
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [code]
+        - name: state
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: nonce
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: code_challenge
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Base64url-encoded SHA-256 hash of the PKCE code verifier.
+        - name: code_challenge_method
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [S256]
+      responses:
+        '200':
+          description: HTML login form with CSRF token.
+
+    post:
+      summary: Submit login credentials
+      operationId: postLogin
+      tags: [Auth]
+      security: []
+      description: |
+        Submits the login form. The form action URL is extracted from the
+        GET response HTML and includes a `user_state` parameter.
+        On success, returns a 302 redirect to `heroapp://auth?code=...&state=...`.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [csrfmiddlewaretoken, email, password]
+              properties:
+                csrfmiddlewaretoken:
+                  type: string
+                  description: CSRF token from the login form.
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+                  format: password
+                visitor_id:
+                  type: string
+                  default: ""
+      responses:
+        '302':
+          description: Redirect to `heroapp://auth?code=...&state=...`
+          headers:
+            Location:
+              schema:
+                type: string
+                example: "heroapp://auth?code=ABC123&state=xyz"
+        '401':
+          description: Invalid email or password.
+
+  /o/token/:
+    servers:
+      - url: https://id.herohealth.com
+    post:
+      summary: Exchange code or refresh token
+      operationId: postToken
+      tags: [Auth]
+      security: []
+      description: |
+        Standard OAuth2 token endpoint. Supports two grant types:
+        - `authorization_code` — exchange an auth code (with PKCE verifier) for tokens.
+        - `refresh_token` — exchange a refresh token for new tokens.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [grant_type, client_id]
+              properties:
+                grant_type:
+                  type: string
+                  enum: [authorization_code, refresh_token]
+                client_id:
+                  type: string
+                  example: "sGNw0O6padHYWwSWIon21jt1QqEYAkmZLYUps60L"
+                code:
+                  type: string
+                  description: Required for authorization_code grant.
+                redirect_uri:
+                  type: string
+                  description: Required for authorization_code grant.
+                  example: "heroapp://auth"
+                code_verifier:
+                  type: string
+                  description: PKCE verifier. Required for authorization_code grant.
+                refresh_token:
+                  type: string
+                  description: Required for refresh_token grant.
+      responses:
+        '200':
+          description: Token response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '400':
+          description: Invalid grant or expired token.
+
+  # ── Data API (cloud.herohealth.com) ────────────────────────────
+
+  /frontend/user-details/:
+    get:
+      summary: Get user profile
+      operationId: getUserDetails
+      tags: [User]
+      parameters:
+        - $ref: '#/components/parameters/HeroClient'
+      responses:
+        '200':
+          description: User profile information.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  first_name:
+                    type: string
+                    example: "First"
+                  last_name:
+                    type: string
+                    example: "Last"
+                  gender:
+                    type: string
+                    example: "unspecified"
+                  date_of_birth:
+                    type: string
+                    format: date
+                    nullable: true
+                  health_conditions:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/HealthCondition'
+                  mobile:
+                    type: string
+                    nullable: true
+
+  /frontend/home-screen-doses/:
+    get:
+      summary: Get doses grouped by date and time
+      operationId: getHomeScreenDoses
+      tags: [Doses]
+      parameters:
+        - $ref: '#/components/parameters/HeroClient'
+      description: |
+        Returns medication doses grouped by date, then by scheduled time.
+        Each dose includes its state, dispensed time, and the pills involved.
+        Typically returns today and yesterday.
+      responses:
+        '200':
+          description: Doses grouped by date and scheduled time.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  dates:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DateEntry'
+                  has_more:
+                    type: boolean
+
+  /frontend/get-home-screen-events/:
+    get:
+      summary: Get recent dispensing events
+      operationId: getHomeScreenEvents
+      tags: [Events]
+      parameters:
+        - $ref: '#/components/parameters/HeroClient'
+      description: |
+        Returns recent dispensing events grouped by day (today, yesterday).
+        Events have a flat pill structure (unlike doses which nest pill info).
+      responses:
+        '200':
+          description: Events grouped by day.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  today:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Event'
+                  yesterday:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Event'
+
+  /frontend/pills-by-schedules/:
+    get:
+      summary: Get pills organized by schedule
+      operationId: getPillsBySchedules
+      tags: [Medications]
+      parameters:
+        - $ref: '#/components/parameters/HeroClient'
+      responses:
+        '200':
+          description: Pills grouped by their schedules.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  schedules:
+                    type: object
+                  pending_changes:
+                    type: object
+
+  /frontend/device-config-get/:
+    get:
+      summary: Get device configuration and pill slot info
+      operationId: getDeviceConfig
+      tags: [Device]
+      parameters:
+        - $ref: '#/components/parameters/HeroClient'
+      description: |
+        Returns device settings and a detailed list of pills loaded in each
+        slot, including schedules, refill dates, pill levels, and dispense counts.
+      responses:
+        '200':
+          description: Device configuration.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  parental_lock:
+                    type: boolean
+                    nullable: true
+                  timezone_offset:
+                    type: integer
+                    description: UTC offset in hours.
+                    example: -8
+                  travel_mode:
+                    type: boolean
+                  update_error:
+                    type: string
+                    nullable: true
+                  update_error_msg:
+                    type: string
+                    nullable: true
+                  last_change_id:
+                    type: integer
+                  pills:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DevicePill'
+
+  /frontend/get-taken-slots/:
+    get:
+      summary: Get occupied slot numbers
+      operationId: getTakenSlots
+      tags: [Device]
+      parameters:
+        - $ref: '#/components/parameters/HeroClient'
+      description: Returns a list of slot numbers (1-10) that have pills loaded.
+      responses:
+        '200':
+          description: List of occupied slot indices.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  slots:
+                    type: array
+                    items:
+                      type: integer
+                    example: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+  /frontend/pill-remaining-days/:
+    get:
+      summary: Get remaining days for a medication slot
+      operationId: getPillRemainingDays
+      tags: [Medications]
+      parameters:
+        - $ref: '#/components/parameters/HeroClient'
+        - name: slot_index
+          in: query
+          required: true
+          schema:
+            type: integer
+          description: Slot number (1-10).
+          example: 1
+      description: |
+        Estimates how many days of supply remain for a given slot.
+        Returns `error: "cannot_calculate"` with null values if the
+        device doesn't have enough data (e.g. pill count unknown).
+      responses:
+        '200':
+          description: Remaining days estimate.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RemainingDays'
+
+  /frontend/owner-details/:
+    get:
+      summary: Get owner details
+      operationId: getOwnerDetails
+      tags: [User]
+      parameters:
+        - $ref: '#/components/parameters/HeroClient'
+      responses:
+        '200':
+          description: Owner information.
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /frontend/activity-log-device/:
+    get:
+      summary: Get device activity log
+      operationId: getActivityLogDevice
+      tags: [Device]
+      parameters:
+        - $ref: '#/components/parameters/HeroClient'
+      responses:
+        '200':
+          description: Device activity log entries.
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /frontend/user-config-current:
+    get:
+      summary: Get current medication configuration
+      operationId: getUserConfigCurrent
+      tags: [Medications]
+      parameters:
+        - $ref: '#/components/parameters/HeroClient'
+      responses:
+        '200':
+          description: Current configuration.
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /frontend/safety-settings-read/:
+    get:
+      summary: Get safety settings
+      operationId: getSafetySettings
+      tags: [Device]
+      parameters:
+        - $ref: '#/components/parameters/HeroClient'
+      responses:
+        '200':
+          description: Safety settings.
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /frontend/vacation-get-config/:
+    get:
+      summary: Get vacation mode configuration
+      operationId: getVacationConfig
+      tags: [Device]
+      parameters:
+        - $ref: '#/components/parameters/HeroClient'
+      responses:
+        '200':
+          description: Vacation mode configuration.
+          content:
+            application/json:
+              schema:
+                type: object
+
+tags:
+  - name: Auth
+    description: OAuth2 authentication on id.herohealth.com
+  - name: User
+    description: User profile and account information
+  - name: Doses
+    description: Medication dose schedules and history
+  - name: Events
+    description: Dispensing event history
+  - name: Medications
+    description: Pill configuration and supply tracking
+  - name: Device
+    description: Hero dispenser hardware and settings
